@@ -102,6 +102,7 @@ interface DAWState {
   pianoRollChannelId: string | null;
   beatGeneratorOpen: boolean;
   sampleSlicerOpen: boolean;
+  youtubeConverterOpen: boolean;
   lastGenerationResult: BeatGenerationResult | null;
   theme: string;
 
@@ -148,6 +149,7 @@ interface DAWState {
   setActiveView: (view: ViewType) => void;
   setBeatGeneratorOpen: (open: boolean) => void;
   setSampleSlicerOpen: (open: boolean) => void;
+  setYoutubeConverterOpen: (open: boolean) => void;
   setTheme: (theme: string) => void;
   applyGeneratedPattern: (result: BeatGenerationResult) => void;
 }
@@ -175,6 +177,7 @@ export const useDAWStore = create<DAWState>()(
     pianoRollChannelId: null,
     beatGeneratorOpen: false,
     sampleSlicerOpen: false,
+    youtubeConverterOpen: false,
     lastGenerationResult: null,
     theme: 'classic',
 
@@ -464,6 +467,7 @@ export const useDAWStore = create<DAWState>()(
     },
     setBeatGeneratorOpen: (beatGeneratorOpen) => set({ beatGeneratorOpen }),
     setSampleSlicerOpen: (sampleSlicerOpen) => set({ sampleSlicerOpen }),
+    setYoutubeConverterOpen: (youtubeConverterOpen) => set({ youtubeConverterOpen }),
     setTheme: (theme) => set({ theme }),
 
     applyGeneratedPattern: (result) => {

@@ -29,10 +29,11 @@ Built on **Next.js 15**, **Tone.js**, **Zustand**, and **Meyda**. Everything run
 6. [Data Flow Diagrams](#data-flow-diagrams)
 7. [Audio Signal Chain](#audio-signal-chain)
 8. [Beat Generation Pipeline](#beat-generation-pipeline)
-9. [Initialization Sequence](#initialization-sequence)
-10. [Import Graph](#import-graph)
-11. [Styling System](#styling-system)
-12. [Key Technical Decisions](#key-technical-decisions)
+9. [YouTube to MP3 Converter](#youtube-to-mp3-converter)
+10. [Initialization Sequence](#initialization-sequence)
+11. [Import Graph](#import-graph)
+12. [Styling System](#styling-system)
+13. [Key Technical Decisions](#key-technical-decisions)
 
 ---
 
@@ -50,6 +51,12 @@ npm run lint     # ESLint
 
 > **Windows note**: Node binaries are not on the default PATH in non-interactive shells. Prefix all commands with the `export PATH` line above, or add it to your shell profile.
 
+**For YouTube to MP3 conversion** (optional):
+```bash
+pip install yt-dlp        # or: scoop install yt-dlp
+scoop install ffmpeg       # or download from ffmpeg.org
+```
+
 ---
 
 ## Feature Overview
@@ -63,6 +70,7 @@ npm run lint     # ESLint
 | **Beat Generator** | Upload an audio file; AI detects BPM and generates a pattern |
 | **Sample Slicer** | Visual waveform editor; slice samples into channels |
 | **Themes** | 6 animated themes (Classic, Noir, Clouds, Forest, Aurora, Sunset) |
+| **YouTube to MP3** | Paste a YouTube link, convert to MP3, download or load directly into the DAW |
 | **Export** | Record the master output and download as `.webm` |
 | **Persistence** | Full state persisted to IndexedDB (survives page refresh) |
 
@@ -105,7 +113,7 @@ npm run lint     # ESLint
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-The architecture is intentionally **flat**: there is no server, no REST API, no database. The browser is the entire runtime. This is temporary and built in for easy access + usage for now, *smile*
+The architecture is intentionally **flat**: the browser is the primary runtime for all audio/UI work. The only server-side feature is the YouTube to MP3 converter, which uses Next.js API routes to run `yt-dlp` on the host machine (see [YouTube to MP3 Converter](#youtube-to-mp3-converter)).
 
 ---
 
@@ -367,6 +375,7 @@ app/page.tsx  (SSR disabled)
     │   ├── Mixer                (activeView === 'mixer')
     │   └── Playlist             (activeView === 'playlist')
     ├── BeatGenerator (modal)    (beatGeneratorOpen === true)
+    ├── YouTubeConverter (modal) (youtubeConverterOpen === true)
     ├── SampleSlicer  (modal)    (sampleSlicerOpen === true)
     └── ThemePicker  (overlay)   (shown via state flag)
 ```
@@ -823,6 +832,65 @@ Bass follows kick          Synth/Perc: random         Clap (style-specific)
 
 ---
 
+## YouTube to MP3 Converter
+
+The DAW includes a built-in YouTube to MP3 converter powered by [yt-dlp](https://github.com/yt-dlp/yt-dlp). This is the first server-side feature — it uses Next.js API routes to run `yt-dlp` on the host machine.
+
+### Prerequisites
+
+Both tools must be installed and available on your system PATH:
+
+| Tool | Purpose | Install |
+|---|---|---|
+| **yt-dlp** | Downloads audio from YouTube | `pip install yt-dlp` or `scoop install yt-dlp` or [releases](https://github.com/yt-dlp/yt-dlp#installation) |
+| **ffmpeg** | Converts downloaded audio to MP3 | `scoop install ffmpeg` or [ffmpeg.org](https://ffmpeg.org/download.html) |
+
+### How It Works
+
+```
+User pastes YouTube URL
+        │
+        ▼
+Frontend calls GET /api/youtube/info?url=...
+        │
+        ▼
+API route runs:  yt-dlp --dump-json --no-playlist <url>
+        │
+        ▼
+Returns video metadata (title, duration, thumbnail, uploader)
+        │
+        ▼
+User clicks "Download MP3"
+        │
+        ▼
+Frontend calls POST /api/youtube/download  { url, title }
+        │
+        ▼
+API route runs:  yt-dlp -x --audio-format mp3 --audio-quality 0 -o <tmpdir>/<uuid>.%(ext)s <url>
+        │
+        ├── yt-dlp downloads best audio stream
+        ├── ffmpeg converts to MP3 (VBR quality 0 = best)
+        └── API reads the MP3 file and returns it as a binary response
+                │
+                ▼
+        User can either:
+          ├── "Save to Disk"    → browser download dialog
+          └── "Load into DAW"   → stores in IndexedDB, adds sample channel
+```
+
+### API Routes
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/api/youtube/info` | GET | Fetch video metadata (title, duration, thumbnail) |
+| `/api/youtube/download` | POST | Download and convert video to MP3, return audio file |
+
+### UI Access
+
+Click the **▶ YT MP3** button in the TopBar (next to the Sample Slicer button) to open the converter modal.
+
+---
+
 ## Initialization Sequence
 
 ```
@@ -897,6 +965,10 @@ app/page.tsx
             │       ├── lib/store.ts
             │       ├── web-audio-beat-detector
             │       └── meyda
+            │
+            ├── components/daw/YouTubeConverter.tsx
+            │       ├── lib/store.ts
+            │       └── lib/idb-storage.ts
             │
             ├── components/daw/SampleSlicer.tsx
             │       ├── lib/store.ts
@@ -1053,6 +1125,10 @@ Turbopack enforces strict `@import` ordering. In `app/globals.css`, all `@import
 ```
 beat-forge-studio/
 ├── app/
+│   ├── api/
+│   │   └── youtube/
+│   │       ├── info/route.ts      # GET — fetch video metadata via yt-dlp
+│   │       └── download/route.ts  # POST — download + convert to MP3
 │   ├── globals.css          # Theme CSS variables, animations, scrollbars
 │   ├── layout.tsx           # <html> root, metadata, font loading
 │   └── page.tsx             # Entry: dynamic import DAWShell (ssr: false)
@@ -1065,6 +1141,7 @@ beat-forge-studio/
 │   ├── Mixer.tsx            # Channel strips with knobs
 │   ├── Playlist.tsx         # Song arrangement (clips on tracks)
 │   ├── BeatGenerator.tsx    # AI beat generation modal
+│   ├── YouTubeConverter.tsx # YouTube to MP3 converter modal
 │   ├── SampleSlicer.tsx     # Waveform slice editor
 │   ├── RecordExportBar.tsx  # Master record & download
 │   ├── ThemeBackground.tsx  # Animated per-theme backgrounds

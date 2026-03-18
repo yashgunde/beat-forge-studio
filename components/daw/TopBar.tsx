@@ -50,6 +50,8 @@ export default function TopBar() {
   const setBeatGeneratorOpen = useDAWStore((s) => s.setBeatGeneratorOpen);
   const sampleSlicerOpen = useDAWStore((s) => s.sampleSlicerOpen);
   const setSampleSlicerOpen = useDAWStore((s) => s.setSampleSlicerOpen);
+  const youtubeConverterOpen = useDAWStore((s) => s.youtubeConverterOpen);
+  const setYoutubeConverterOpen = useDAWStore((s) => s.setYoutubeConverterOpen);
   const setMasterVolume = useDAWStore((s) => s.setMasterVolume);
   const addPattern = useDAWStore((s) => s.addPattern);
   const setActivePattern = useDAWStore((s) => s.setActivePattern);
@@ -346,6 +348,19 @@ export default function TopBar() {
           title="Open Sample Slicer"
         >
           ✂️ SAMPLE
+        </button>
+
+        <button
+          onClick={() => setYoutubeConverterOpen(!youtubeConverterOpen)}
+          className={[
+            'px-3 py-1.5 rounded text-[10px] font-mono font-bold tracking-wider transition-all',
+            'bg-gradient-to-r from-red-600 to-rose-700 text-white',
+            'hover:from-red-500 hover:to-rose-600 hover:shadow-lg hover:shadow-red-500/25',
+            youtubeConverterOpen ? 'ring-2 ring-red-400 ring-offset-1 ring-offset-daw-panel' : '',
+          ].join(' ')}
+          title="YouTube to MP3 Converter"
+        >
+          ▶ YT MP3
         </button>
       </div>
 

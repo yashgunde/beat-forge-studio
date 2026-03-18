@@ -22,9 +22,11 @@ No test runner is configured. There are no test files.
 
 ## Architecture
 
-### Core constraint: everything is client-side only
+### Core constraint: client-side first
 
-This is a browser DAW. The entire application runs with SSR disabled. `app/page.tsx` must have `'use client'` and uses `dynamic(() => import(...), { ssr: false })` to load `DAWShell`. All `components/daw/` files and `lib/audioEngine.ts` require `'use client'`. The webpack config (`next.config.ts`) stubs out `fs`, `path`, and `os` because audio libraries attempt to import them.
+This is a browser DAW. The DAW UI and audio engine run entirely client-side with SSR disabled. `app/page.tsx` must have `'use client'` and uses `dynamic(() => import(...), { ssr: false })` to load `DAWShell`. All `components/daw/` files and `lib/audioEngine.ts` require `'use client'`. The webpack config (`next.config.ts`) stubs out `fs`, `path`, and `os` because audio libraries attempt to import them.
+
+**Exception**: The YouTube to MP3 converter uses Next.js API routes (`app/api/youtube/`) which run server-side. These routes shell out to `yt-dlp` and `ffmpeg` via `child_process`.
 
 ### State: single Zustand store
 
@@ -83,6 +85,7 @@ Use `guess()` when both values are needed. Using `analyze()` and trying to destr
 - **`playlist`** — `Playlist`: song arrangement grid. `PlaylistClip` references a `patternId` and is positioned by `track` (0-7) and `startBar`.
 
 `BeatGenerator` is a modal overlay rendered in `DAWShell` when `beatGeneratorOpen` is true.
+`YouTubeConverter` is a modal overlay rendered when `youtubeConverterOpen` is true. It calls `/api/youtube/info` and `/api/youtube/download` API routes which run `yt-dlp` server-side.
 
 ### Beat generation flow
 
