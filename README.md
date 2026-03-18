@@ -1,4 +1,4 @@
-# Beat Forge Studio (YGBeatz)
+# YGBeatz
 
 > A fully browser-based Digital Audio Workstation — no backend, no plugins, no install.
 
