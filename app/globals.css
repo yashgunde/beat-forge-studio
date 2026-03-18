@@ -1,0 +1,448 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   THEME DEFINITIONS — CSS Custom Properties
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Classic (default) ─────────────────────────────────────────────────── */
+:root,
+[data-theme="classic"] {
+  --daw-bg: #030304;
+  --daw-panel: #1a1a24;
+  --daw-card: #22222e;
+  --daw-border: #2e2e3e;
+  --daw-accent: #ff8c00;
+  --daw-accent-dark: #cc7000;
+  --daw-accent-light: #ffad40;
+  --daw-green: #4caf50;
+  --daw-red: #f44336;
+  --daw-blue: #2196f3;
+  --daw-purple: #9c27b0;
+  --daw-text: #e0e0e0;
+  --daw-text-muted: #888899;
+  --daw-step-on: #ff8c00;
+  --daw-step-off: #2a2a38;
+  --daw-step-hover: #3a3a50;
+
+  /* Background effects */
+  --daw-glow-color: rgba(255, 140, 0, 0.08);
+  --daw-glow-color-strong: rgba(255, 140, 0, 0.15);
+  --daw-panel-glass: rgba(26, 26, 36, 0.85);
+  --daw-bg-gradient: linear-gradient(145deg, #030304 0%, #0a0a14 50%, #030304 100%);
+  --daw-scrollbar-thumb: linear-gradient(180deg, #ff8c00, #cc6a00);
+  --daw-scrollbar-thumb-hover: linear-gradient(180deg, #ffaa33, #ff8c00);
+  --daw-scanline-opacity: 0.012;
+}
+
+/* ── Classic Noir ──────────────────────────────────────────────────────── */
+[data-theme="classic-noir"] {
+  --daw-bg: #0a0a0a;
+  --daw-panel: #161616;
+  --daw-card: #1e1e1e;
+  --daw-border: #2a2a2a;
+  --daw-accent: #c0c0c0;
+  --daw-accent-dark: #909090;
+  --daw-accent-light: #e8e8e8;
+  --daw-green: #6abf6a;
+  --daw-red: #e06060;
+  --daw-blue: #6aa8e0;
+  --daw-purple: #a06ac0;
+  --daw-text: #d4d4d4;
+  --daw-text-muted: #707070;
+  --daw-step-on: #d0d0d0;
+  --daw-step-off: #1a1a1a;
+  --daw-step-hover: #2e2e2e;
+
+  --daw-glow-color: rgba(200, 200, 200, 0.04);
+  --daw-glow-color-strong: rgba(200, 200, 200, 0.1);
+  --daw-panel-glass: rgba(16, 16, 16, 0.9);
+  --daw-bg-gradient: linear-gradient(145deg, #0a0a0a 0%, #111111 50%, #0a0a0a 100%);
+  --daw-scrollbar-thumb: linear-gradient(180deg, #888, #666);
+  --daw-scrollbar-thumb-hover: linear-gradient(180deg, #aaa, #888);
+  --daw-scanline-opacity: 0.02;
+}
+
+/* ── Clouds ─────────────────────────────────────────────────────────────── */
+[data-theme="clouds"] {
+  --daw-bg: #0c0e1a;
+  --daw-panel: #141828;
+  --daw-card: #1a2035;
+  --daw-border: #283050;
+  --daw-accent: #7eb8ff;
+  --daw-accent-dark: #5a90d0;
+  --daw-accent-light: #b0d4ff;
+  --daw-green: #6dd6a0;
+  --daw-red: #ff7e8e;
+  --daw-blue: #7eb8ff;
+  --daw-purple: #b08eef;
+  --daw-text: #dce4f0;
+  --daw-text-muted: #7888a8;
+  --daw-step-on: #7eb8ff;
+  --daw-step-off: #182030;
+  --daw-step-hover: #253550;
+
+  --daw-glow-color: rgba(126, 184, 255, 0.06);
+  --daw-glow-color-strong: rgba(126, 184, 255, 0.12);
+  --daw-panel-glass: rgba(20, 24, 40, 0.8);
+  --daw-bg-gradient: linear-gradient(145deg, #0c0e1a 0%, #101830 50%, #0c0e1a 100%);
+  --daw-scrollbar-thumb: linear-gradient(180deg, #5a8cc0, #3a6090);
+  --daw-scrollbar-thumb-hover: linear-gradient(180deg, #7eb8ff, #5a8cc0);
+  --daw-scanline-opacity: 0.008;
+}
+
+/* ── Forest ──────────────────────────────────────────────────────────────── */
+[data-theme="forest"] {
+  --daw-bg: #060d08;
+  --daw-panel: #0e1a10;
+  --daw-card: #14241a;
+  --daw-border: #1e3828;
+  --daw-accent: #5ecc7e;
+  --daw-accent-dark: #3ea060;
+  --daw-accent-light: #88e8a0;
+  --daw-green: #5ecc7e;
+  --daw-red: #e87060;
+  --daw-blue: #60b0d0;
+  --daw-purple: #9870c8;
+  --daw-text: #c8dcc8;
+  --daw-text-muted: #608868;
+  --daw-step-on: #5ecc7e;
+  --daw-step-off: #0c1a10;
+  --daw-step-hover: #1a3020;
+
+  --daw-glow-color: rgba(94, 204, 126, 0.06);
+  --daw-glow-color-strong: rgba(94, 204, 126, 0.12);
+  --daw-panel-glass: rgba(14, 26, 16, 0.85);
+  --daw-bg-gradient: linear-gradient(145deg, #060d08 0%, #0a1a0e 50%, #060d08 100%);
+  --daw-scrollbar-thumb: linear-gradient(180deg, #5ecc7e, #3ea060);
+  --daw-scrollbar-thumb-hover: linear-gradient(180deg, #88e8a0, #5ecc7e);
+  --daw-scanline-opacity: 0.008;
+}
+
+/* ── Aurora ──────────────────────────────────────────────────────────────── */
+[data-theme="aurora"] {
+  --daw-bg: #080810;
+  --daw-panel: #12122a;
+  --daw-card: #1a1a38;
+  --daw-border: #2a2a50;
+  --daw-accent: #c77dff;
+  --daw-accent-dark: #9d4edd;
+  --daw-accent-light: #e0aaff;
+  --daw-green: #72efdd;
+  --daw-red: #ff6b8a;
+  --daw-blue: #48bfe3;
+  --daw-purple: #c77dff;
+  --daw-text: #e0d8ef;
+  --daw-text-muted: #8878a8;
+  --daw-step-on: #c77dff;
+  --daw-step-off: #161630;
+  --daw-step-hover: #2a2a4a;
+
+  --daw-glow-color: rgba(199, 125, 255, 0.06);
+  --daw-glow-color-strong: rgba(199, 125, 255, 0.15);
+  --daw-panel-glass: rgba(18, 18, 42, 0.8);
+  --daw-bg-gradient: linear-gradient(145deg, #080810 0%, #100a20 50%, #080810 100%);
+  --daw-scrollbar-thumb: linear-gradient(180deg, #c77dff, #9d4edd);
+  --daw-scrollbar-thumb-hover: linear-gradient(180deg, #e0aaff, #c77dff);
+  --daw-scanline-opacity: 0.006;
+}
+
+/* ── Sunset ──────────────────────────────────────────────────────────────── */
+[data-theme="sunset"] {
+  --daw-bg: #0e0608;
+  --daw-panel: #1e1018;
+  --daw-card: #2a1820;
+  --daw-border: #3e2830;
+  --daw-accent: #ff6b6b;
+  --daw-accent-dark: #d04848;
+  --daw-accent-light: #ff9e9e;
+  --daw-green: #a8e06a;
+  --daw-red: #ff6b6b;
+  --daw-blue: #6ac0e0;
+  --daw-purple: #d088e0;
+  --daw-text: #eed8d8;
+  --daw-text-muted: #906868;
+  --daw-step-on: #ff6b6b;
+  --daw-step-off: #1a0e10;
+  --daw-step-hover: #301a20;
+
+  --daw-glow-color: rgba(255, 107, 107, 0.06);
+  --daw-glow-color-strong: rgba(255, 107, 107, 0.12);
+  --daw-panel-glass: rgba(30, 16, 24, 0.85);
+  --daw-bg-gradient: linear-gradient(145deg, #0e0608 0%, #180a10 50%, #0e0608 100%);
+  --daw-scrollbar-thumb: linear-gradient(180deg, #ff6b6b, #d04848);
+  --daw-scrollbar-thumb-hover: linear-gradient(180deg, #ff9e9e, #ff6b6b);
+  --daw-scanline-opacity: 0.01;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   BASE STYLES
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  background: var(--daw-bg-gradient);
+  color: var(--daw-text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  user-select: none;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SCROLLBAR
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--daw-panel);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--daw-scrollbar-thumb);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--daw-scrollbar-thumb-hover);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   GLASSMORPHISM & PANELS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.glass-panel {
+  background: var(--daw-panel-glass);
+  backdrop-filter: blur(16px) saturate(1.3);
+  -webkit-backdrop-filter: blur(16px) saturate(1.3);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+/* Knob styles */
+.knob {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, #4a4a5e, #1a1a2e);
+  border: 1px solid var(--daw-border);
+  cursor: pointer;
+  position: relative;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   STEP BUTTONS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.step-btn {
+  border-radius: 5px;
+  transition: all 0.1s ease;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 1px 3px rgba(0,0,0,0.2);
+}
+
+.step-btn-on {
+  box-shadow:
+    0 0 10px var(--ch-color),
+    0 0 3px var(--ch-color),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+
+.step-btn-current {
+  box-shadow: 0 0 14px rgba(255, 255, 255, 0.7), 0 0 6px white;
+  transform: scale(1.1);
+  z-index: 10;
+  position: relative;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CHANNEL / VU / ACCENT
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.channel-strip-gradient {
+  background: linear-gradient(180deg, var(--daw-card) 0%, var(--daw-panel) 100%);
+}
+
+.neon-accent {
+  color: var(--daw-accent);
+  text-shadow: 0 0 12px var(--daw-glow-color-strong), 0 0 4px var(--daw-glow-color);
+}
+
+.vu-segment-green {
+  background: linear-gradient(to top, #00ff88, #00cc66);
+}
+.vu-segment-yellow {
+  background: linear-gradient(to top, #ffcc00, #ff8800);
+}
+.vu-segment-red {
+  background: linear-gradient(to top, #ff4444, #ff0000);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ANIMATIONS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+@keyframes scanline {
+  0%   { background-position: 0 0; }
+  100% { background-position: 0 100%; }
+}
+
+.scanline-overlay {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 13px,
+    rgba(255, 255, 255, var(--daw-scanline-opacity)) 13px,
+    rgba(255, 255, 255, var(--daw-scanline-opacity)) 14px
+  );
+  animation: scanline 8s linear infinite;
+  z-index: 0;
+}
+
+@keyframes stepPulse {
+  0%   { box-shadow: 0 0 0 0 var(--daw-glow-color-strong); }
+  70%  { box-shadow: 0 0 0 5px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+.step-active-pulse {
+  animation: stepPulse 0.3s ease-out;
+}
+
+@keyframes playingPulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.6; }
+}
+.playing-indicator {
+  animation: playingPulse 1s ease-in-out infinite;
+}
+
+/* VU meter */
+@keyframes vuMeter {
+  0%   { height: 0%; }
+  100% { height: var(--level); }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CLOUD / BACKGROUND ANIMATIONS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+@keyframes cloudFloat {
+  0%   { transform: translateX(-10%) translateY(0); opacity: 0; }
+  10%  { opacity: 1; }
+  90%  { opacity: 1; }
+  100% { transform: translateX(110%) translateY(-8%); opacity: 0; }
+}
+
+@keyframes cloudFloat2 {
+  0%   { transform: translateX(110%) translateY(0); opacity: 0; }
+  10%  { opacity: 0.7; }
+  90%  { opacity: 0.7; }
+  100% { transform: translateX(-10%) translateY(5%); opacity: 0; }
+}
+
+@keyframes auroraWave {
+  0%   { transform: translateY(0) scaleX(1); opacity: 0.3; }
+  25%  { transform: translateY(-8%) scaleX(1.1); opacity: 0.5; }
+  50%  { transform: translateY(-3%) scaleX(0.95); opacity: 0.35; }
+  75%  { transform: translateY(-10%) scaleX(1.05); opacity: 0.45; }
+  100% { transform: translateY(0) scaleX(1); opacity: 0.3; }
+}
+
+@keyframes particleDrift {
+  0%   { transform: translateY(100vh) scale(0); opacity: 0; }
+  10%  { opacity: 1; }
+  90%  { opacity: 1; }
+  100% { transform: translateY(-10vh) scale(1); opacity: 0; }
+}
+
+@keyframes gentlePulse {
+  0%, 100% { opacity: 0.3; transform: scale(1); }
+  50%      { opacity: 0.6; transform: scale(1.05); }
+}
+
+@keyframes fogDrift {
+  0%   { transform: translateX(0) translateY(0); }
+  33%  { transform: translateX(3%) translateY(-2%); }
+  66%  { transform: translateX(-2%) translateY(1%); }
+  100% { transform: translateX(0) translateY(0); }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   PIANO / DRAG / TOOLTIP
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.piano-note {
+  position: absolute;
+  border-radius: 3px;
+  cursor: pointer;
+  min-width: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.15);
+}
+
+.drag-handle:hover  { cursor: grab; }
+.drag-handle:active { cursor: grabbing; }
+
+.tooltip {
+  position: relative;
+}
+.tooltip::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--daw-panel);
+  border: 1px solid var(--daw-border);
+  color: var(--daw-text);
+  padding: 3px 8px;
+  border-radius: 4px;
+  white-space: nowrap;
+  font-size: 10px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+  z-index: 1000;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+.tooltip:hover::after {
+  opacity: 1;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ETHEREAL ENHANCEMENTS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Subtle glow on panels */
+.daw-panel-glow {
+  box-shadow: 0 0 30px var(--daw-glow-color), inset 0 1px 0 rgba(255,255,255,0.04);
+}
+
+/* Smooth transitions on theme switch */
+*,
+*::before,
+*::after {
+  transition-property: background-color, border-color, color, box-shadow;
+  transition-duration: 0.4s;
+  transition-timing-function: ease;
+}
+
+/* Opt out of transition on interactive elements that need snappy response */
+button, input, select, .step-btn, [role="slider"] {
+  transition-duration: 0.1s;
+}
