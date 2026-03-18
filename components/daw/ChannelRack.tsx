@@ -8,6 +8,7 @@ import React, {
   useEffect,
 } from 'react';
 import { useDAWStore } from '@/lib/store';
+import { AudioEngine } from '@/lib/audioEngine';
 import { Channel, SOUND_PRESETS, SoundPreset } from '@/lib/types';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -49,6 +50,56 @@ const FILTER_TAGS = [
 ] as const;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Convert an AudioBuffer to a WAV Blob for frozen channel playback. */
+function audioBufferToWavBlob(buffer: AudioBuffer): Blob {
+  const numChannels = buffer.numberOfChannels;
+  const sampleRate = buffer.sampleRate;
+  const length = buffer.length;
+  const bytesPerSample = 2; // 16-bit PCM
+  const dataSize = length * numChannels * bytesPerSample;
+  const headerSize = 44;
+  const arrayBuffer = new ArrayBuffer(headerSize + dataSize);
+  const view = new DataView(arrayBuffer);
+
+  // WAV header
+  const writeString = (offset: number, str: string) => {
+    for (let i = 0; i < str.length; i++) {
+      view.setUint8(offset + i, str.charCodeAt(i));
+    }
+  };
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true); // subchunk1 size
+  view.setUint16(20, 1, true);  // PCM format
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * numChannels * bytesPerSample, true);
+  view.setUint16(32, numChannels * bytesPerSample, true);
+  view.setUint16(34, 16, true); // bits per sample
+  writeString(36, 'data');
+  view.setUint32(40, dataSize, true);
+
+  // Interleave channel data as 16-bit PCM
+  const channels: Float32Array[] = [];
+  for (let ch = 0; ch < numChannels; ch++) {
+    channels.push(buffer.getChannelData(ch));
+  }
+
+  let offset = headerSize;
+  for (let i = 0; i < length; i++) {
+    for (let ch = 0; ch < numChannels; ch++) {
+      const sample = Math.max(-1, Math.min(1, channels[ch][i]));
+      const int16 = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+      view.setInt16(offset, int16, true);
+      offset += 2;
+    }
+  }
+
+  return new Blob([arrayBuffer], { type: 'audio/wav' });
+}
 
 /** Build beat labels like "1.1", "1.2", … "2.1" … for totalSteps steps. */
 function buildBeatLabels(totalSteps: number): string[] {
@@ -157,44 +208,29 @@ const ChannelNameEditor = React.memo(function ChannelNameEditor({
 
 interface StepButtonProps {
   active: boolean;
-  isCurrent: boolean;
-  isPlaying: boolean;
+  stepIndex: number;
   channelColor: string;
   onToggle: () => void;
 }
 
 const StepButton = React.memo(function StepButton({
   active,
-  isCurrent,
-  isPlaying,
+  stepIndex,
   channelColor,
   onToggle,
 }: StepButtonProps) {
-  const isCurrentAndPlaying = isCurrent && isPlaying;
-
-  const classes = [
-    'w-full h-10 cursor-pointer focus:outline-none step-btn',
-    active ? 'step-btn-on' : '',
-    isCurrentAndPlaying ? 'step-btn-current' : '',
-  ]
-    .filter(Boolean)
-    .join(' ');
-
   return (
     <button
+      data-step={stepIndex}
       onClick={onToggle}
       style={
         {
           '--ch-color': channelColor,
-          backgroundColor: active
-            ? channelColor
-            : isCurrentAndPlaying
-            ? 'rgba(255,255,255,0.18)'
-            : 'var(--daw-step-off)',
+          backgroundColor: active ? channelColor : 'var(--daw-step-off)',
           border: active ? 'none' : '1px solid var(--daw-border)',
         } as React.CSSProperties
       }
-      className={classes}
+      className={`w-full h-10 cursor-pointer focus:outline-none step-btn ${active ? 'step-btn-on' : ''}`}
       aria-pressed={active}
     />
   );
@@ -205,8 +241,6 @@ const StepButton = React.memo(function StepButton({
 interface ChannelRowProps {
   channel: Channel;
   rowIndex: number;
-  currentStep: number;
-  isPlaying: boolean;
   totalSteps: number;
   onContextMenu: (e: React.MouseEvent, channelId: string) => void;
 }
@@ -214,12 +248,11 @@ interface ChannelRowProps {
 const ChannelRow = React.memo(function ChannelRow({
   channel,
   rowIndex,
-  currentStep,
-  isPlaying,
   totalSteps,
   onContextMenu,
 }: ChannelRowProps) {
-  const { toggleStep, updateChannel, openPianoRoll } = useDAWStore();
+  const { toggleStep, updateChannel, openPianoRoll, freezeChannel, unfreezeChannel } = useDAWStore();
+  const [freezing, setFreezing] = useState(false);
 
   const handleToggleStep = useCallback(
     (stepIdx: number) => {
@@ -261,6 +294,52 @@ const ChannelRow = React.memo(function ChannelRow({
     openPianoRoll(channel.id);
   }, [openPianoRoll, channel.id]);
 
+  const handleFreeze = useCallback(async () => {
+    if (channel.frozen) {
+      // Unfreeze: dispose the frozen player and clear frozen state
+      const engine = AudioEngine.getInstance();
+      engine.disposeFrozenPlayer(channel.id);
+      // Revoke the old blob URL to free memory
+      if (channel.frozenBufferUrl) {
+        URL.revokeObjectURL(channel.frozenBufferUrl);
+      }
+      unfreezeChannel(channel.id);
+      return;
+    }
+
+    // Freeze: render the channel to a buffer
+    if (channel.type === 'sample') return; // sample channels can't be frozen
+    setFreezing(true);
+    try {
+      const engine = AudioEngine.getInstance();
+      const state = useDAWStore.getState();
+      const pattern = state.getActivePattern();
+      if (!pattern) return;
+      const pianoNotes = pattern.pianoRollNotes[channel.id] ?? [];
+
+      const audioBuffer = await engine.renderChannelToBuffer(
+        channel,
+        state.bpm,
+        totalSteps,
+        pianoNotes
+      );
+
+      // Convert AudioBuffer to WAV blob URL
+      const wavBlob = audioBufferToWavBlob(audioBuffer);
+      const blobUrl = URL.createObjectURL(wavBlob);
+
+      // Load the frozen player into the engine
+      await engine.loadFrozenPlayer(channel.id, blobUrl);
+
+      // Update store
+      freezeChannel(channel.id, blobUrl);
+    } catch (err) {
+      console.error('[ChannelRack] Freeze failed:', err);
+    } finally {
+      setFreezing(false);
+    }
+  }, [channel, totalSteps, freezeChannel, unfreezeChannel]);
+
   // Compute step groups for rendering — dynamic based on totalSteps
   const stepGroups = useMemo(() => buildStepGroups(totalSteps), [totalSteps]);
   const numBars = totalSteps / 16;
@@ -273,8 +352,8 @@ const ChannelRow = React.memo(function ChannelRow({
   return (
     <div
       onContextMenu={handleContextMenu}
-      className="flex items-center h-14 border-b border-white/5 group relative"
-      style={{ background: rowBg }}
+      className={`flex items-center h-14 border-b border-white/5 group relative${channel.frozen ? ' opacity-70' : ''}`}
+      style={{ background: channel.frozen ? 'rgba(0,60,80,0.35)' : rowBg }}
     >
       {/* ── Left panel ── */}
       <div
@@ -340,6 +419,26 @@ const ChannelRow = React.memo(function ChannelRow({
         >
           PR
         </button>
+
+        {/* Freeze button */}
+        {channel.type !== 'sample' && (
+          <button
+            title={channel.frozen ? 'Unfreeze channel (restore live synth)' : 'Freeze channel (pre-render to audio)'}
+            onClick={handleFreeze}
+            disabled={freezing}
+            className={[
+              'flex-shrink-0 w-5 h-5 rounded text-[9px] font-bold',
+              'transition-colors focus:outline-none',
+              freezing
+                ? 'bg-daw-card text-daw-accent animate-pulse'
+                : channel.frozen
+                  ? 'bg-cyan-600/80 text-white'
+                  : 'bg-[#1e1e2e] text-[#666] hover:bg-[#2a2a3e] hover:text-cyan-400',
+            ].join(' ')}
+          >
+            {freezing ? '...' : '*'}
+          </button>
+        )}
       </div>
 
       {/* ── Step grid ── */}
@@ -376,8 +475,7 @@ const ChannelRow = React.memo(function ChannelRow({
                   <StepButton
                     key={stepIdx}
                     active={channel.steps[stepIdx] ?? false}
-                    isCurrent={stepIdx === currentStep}
-                    isPlaying={isPlaying}
+                    stepIndex={stepIdx}
                     channelColor={channel.color}
                     onToggle={() => handleToggleStep(stepIdx)}
                   />
@@ -828,8 +926,6 @@ const PresetPicker = React.memo(function PresetPicker({
 export default function ChannelRack() {
   const {
     getActivePattern,
-    currentStep,
-    isPlaying,
     addChannel,
   } = useDAWStore();
 
@@ -839,6 +935,28 @@ export default function ChannelRack() {
 
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [showPresetPicker, setShowPresetPicker] = useState(false);
+
+  // ── Direct DOM step highlight — bypasses React render cycle entirely ──
+  useEffect(() => {
+    let prevStep = -1;
+    const unsub = useDAWStore.subscribe(
+      (s) => ({ step: s.currentStep, playing: s.isPlaying }),
+      ({ step, playing }) => {
+        // Remove highlight from previous step
+        if (prevStep >= 0) {
+          const prev = document.querySelectorAll(`[data-step="${prevStep}"]`);
+          prev.forEach((el) => el.classList.remove('step-playhead'));
+        }
+        // Apply highlight to current step if playing
+        if (playing) {
+          const next = document.querySelectorAll(`[data-step="${step}"]`);
+          next.forEach((el) => el.classList.add('step-playhead'));
+        }
+        prevStep = step;
+      },
+    );
+    return unsub;
+  }, []);
 
   // ── Open preset picker ──
   const handleAddChannel = useCallback(() => {
@@ -958,8 +1076,6 @@ export default function ChannelRack() {
               key={channel.id}
               channel={channel}
               rowIndex={idx}
-              currentStep={currentStep}
-              isPlaying={isPlaying}
               totalSteps={totalSteps}
               onContextMenu={handleContextMenu}
             />

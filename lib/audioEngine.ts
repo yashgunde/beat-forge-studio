@@ -12,6 +12,7 @@
 import { useEffect, useRef } from 'react';
 import * as Tone from 'tone';
 import { useDAWStore } from './store';
+import type { AudioLatencyHint, AudioSampleRate } from './store';
 import type { Channel, ChannelType, Note, Pattern } from './types';
 
 // ---------------------------------------------------------------------------
@@ -44,7 +45,10 @@ type ToneSynth =
   | Tone.NoiseSynth
   | Tone.Synth
   | Tone.FMSynth
-  | Tone.AMSynth;
+  | Tone.AMSynth
+  | Tone.PolySynth<Tone.Synth>
+  | Tone.PolySynth<Tone.FMSynth>
+  | Tone.PolySynth<Tone.AMSynth>;
 
 interface ChannelNodes {
   synth: ToneSynth;
@@ -74,9 +78,27 @@ class AudioEngine {
   // ---- internal state ----
   private masterGain: Tone.Gain | null = null;
   private channelNodes: Map<string, ChannelNodes> = new Map();
+  /** Per-clip channel nodes for playlist mode — avoids shared-synth conflicts */
+  private playlistClipNodes: Map<string, Map<string, ChannelNodes>> = new Map();
   private repeatId: number | null = null;
   private initialized = false;
   private storeUnsubscribers: Array<() => void> = [];
+  private _mixerUpdateTimer: ReturnType<typeof setTimeout> | null = null;
+  private _channelPropsUpdateTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Pre-rendered Tone.Player instances for frozen channels — keyed by channel ID. */
+  private frozenPlayers: Map<string, Tone.Player> = new Map();
+
+  // ---- AudioWorklet step scheduler state ----
+  /** The AudioWorkletNode for sample-accurate step scheduling (null if unsupported or failed to load). */
+  private _workletNode: AudioWorkletNode | null = null;
+  /** Whether the worklet scheduler is available and should be used instead of Tone.Transport. */
+  private _useWorklet = false;
+  /** Whether the worklet is currently running (started via message). */
+  private _workletRunning = false;
+  /** Playback mode: 'pattern' for channel rack, 'playlist' for playlist view. */
+  private _playbackMode: 'pattern' | 'playlist' = 'pattern';
+  /** Playlist-mode total steps (computed from clip arrangement). */
+  private _playlistTotalSteps = 0;
 
   // Private constructor — use getInstance()
   private constructor() {}
@@ -96,6 +118,26 @@ class AudioEngine {
     if (this.initialized) return;
     this.initialized = true; // Set early to prevent re-entry
 
+    // Create a Tone.js context with user-configured latency and sample rate.
+    // Tone.Context options don't expose sampleRate, so we create a raw
+    // AudioContext with both latencyHint and sampleRate, then wrap it.
+    const { audioLatency, audioSampleRate } = useDAWStore.getState();
+    try {
+      const rawCtx = new AudioContext({
+        latencyHint: audioLatency,
+        sampleRate: audioSampleRate,
+      });
+      const ctx = new Tone.Context(rawCtx);
+      Tone.setContext(ctx);
+    } catch (err) {
+      console.warn('[AudioEngine] Failed to create custom context, using default:', err);
+    }
+
+    // Tune scheduling for dense step-sequencer patterns
+    Tone.getContext().lookAhead = 0.1; // 100ms lookahead (default 0.05)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (Tone.getContext() as any).updateInterval = 0.05; // 50ms update cycle
+
     // Master gain node — works even while AudioContext is suspended
     this.masterGain = new Tone.Gain(
       Tone.dbToGain(linearToDb(useDAWStore.getState().masterVolume))
@@ -113,6 +155,10 @@ class AudioEngine {
     // Subscribe to store changes — MUST happen before any user interaction
     this._subscribeToStore();
 
+    // Attempt to initialize the AudioWorklet step scheduler (non-blocking).
+    // Falls back to Tone.Transport if this fails.
+    await this._initWorkletScheduler();
+
     // Edge case: if isPlaying was set before subscriptions existed, start now
     if (useDAWStore.getState().isPlaying) {
       this._transportStart();
@@ -120,6 +166,251 @@ class AudioEngine {
 
     // Attempt early AudioContext unlock (non-blocking, non-fatal)
     Tone.start().catch(() => {});
+  }
+
+  // ---------------------------------------------------------------------------
+  // Audio context reinit with new settings
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Reinitialise the audio context with new latency / sample-rate settings.
+   * Stops playback, disposes all nodes, creates a fresh Tone.Context, then
+   * rebuilds the audio graph. This is called when the user changes audio
+   * settings from the UI.
+   */
+  async reinitWithSettings(latency: AudioLatencyHint, sampleRate: AudioSampleRate): Promise<void> {
+    if (typeof window === 'undefined') return;
+
+    // Stop playback if running
+    const wasPlaying = useDAWStore.getState().isPlaying;
+    if (wasPlaying) {
+      useDAWStore.getState().stop();
+    }
+
+    // Tear down existing transport repeat
+    const transport = Tone.getTransport();
+    if (this.repeatId !== null) {
+      transport.clear(this.repeatId);
+      this.repeatId = null;
+    }
+    transport.stop();
+    transport.position = 0;
+
+    // Dispose all channel nodes
+    for (const nodes of Array.from(this.channelNodes.values())) {
+      this._disposeChannelNodes(nodes);
+    }
+    this.channelNodes.clear();
+    this._disposePlaylistClipNodes();
+
+    // Dispose master gain
+    if (this.masterGain) {
+      this.masterGain.disconnect();
+      this.masterGain.dispose();
+      this.masterGain = null;
+    }
+
+    // Dispose the worklet node if present
+    if (this._workletNode) {
+      try {
+        this._workletNode.port.postMessage({ type: 'stop' });
+        this._workletNode.disconnect();
+      } catch { /* non-fatal */ }
+      this._workletNode = null;
+      this._useWorklet = false;
+      this._workletRunning = false;
+    }
+
+    // Close the old context and create a new one with a raw AudioContext
+    try {
+      const oldCtx = Tone.getContext();
+      const rawCtx = new AudioContext({
+        latencyHint: latency,
+        sampleRate: sampleRate,
+      });
+      const newCtx = new Tone.Context(rawCtx);
+      Tone.setContext(newCtx);
+      // Dispose old context after switching
+      try { await (oldCtx.rawContext as AudioContext).close(); } catch { /* non-fatal */ }
+      oldCtx.dispose();
+    } catch (err) {
+      console.warn('[AudioEngine] Failed to create new context, continuing with current:', err);
+    }
+
+    // Re-tune scheduling
+    Tone.getContext().lookAhead = 0.1;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (Tone.getContext() as any).updateInterval = 0.05;
+
+    // Rebuild master gain
+    this.masterGain = new Tone.Gain(
+      Tone.dbToGain(linearToDb(useDAWStore.getState().masterVolume))
+    ).toDestination();
+
+    // Set transport BPM
+    Tone.getTransport().bpm.value = useDAWStore.getState().bpm;
+
+    // Rebuild channel synths
+    const pattern = useDAWStore.getState().getActivePattern();
+    if (pattern) {
+      this.syncChannels(pattern.channels);
+    }
+
+    // Re-initialize the AudioWorklet scheduler with the new context
+    await this._initWorkletScheduler();
+
+    // Unlock new context
+    Tone.start().catch(() => {});
+
+    console.info(`[AudioEngine] Reinitialised — latency: ${latency}, sampleRate: ${sampleRate}`);
+  }
+
+  // ---------------------------------------------------------------------------
+  // AudioWorklet step scheduler
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Attempt to register and instantiate the AudioWorklet-based step scheduler.
+   * The worklet processor file lives at /audio-worklet/step-scheduler-processor.js
+   * and is served as a static asset by Next.js from the public/ directory.
+   *
+   * If AudioWorklet is not supported or the module fails to load, the engine
+   * falls back to the existing Tone.Transport.scheduleRepeat approach.
+   */
+  private async _initWorkletScheduler(): Promise<void> {
+    try {
+      // Check if AudioWorklet is supported in this browser
+      const rawCtx = Tone.getContext().rawContext;
+      if (!rawCtx || !('audioWorklet' in rawCtx)) {
+        console.info('[AudioEngine] AudioWorklet not supported — using Tone.Transport fallback.');
+        return;
+      }
+
+      // Register the worklet processor module
+      await (rawCtx as AudioContext).audioWorklet.addModule('/audio-worklet/step-scheduler-processor.js');
+
+      // Create the AudioWorkletNode
+      this._workletNode = new AudioWorkletNode(rawCtx as AudioContext, 'step-scheduler-processor');
+
+      // Connect the worklet node so it processes (it doesn't produce audio, but it
+      // needs to be in the graph to keep its process() method called).
+      // Connect to the raw AudioContext destination so it stays alive.
+      this._workletNode.connect((rawCtx as AudioContext).destination);
+
+      // Listen for step messages from the worklet
+      this._workletNode.port.onmessage = (event: MessageEvent) => {
+        const data = event.data;
+        if (data.type === 'step') {
+          this._onWorkletStep(data.step);
+        } else if (data.type === 'stopped') {
+          this._workletRunning = false;
+        }
+      };
+
+      // Set initial BPM
+      this._workletNode.port.postMessage({
+        type: 'setBpm',
+        bpm: useDAWStore.getState().bpm,
+      });
+
+      this._useWorklet = true;
+      console.info('[AudioEngine] AudioWorklet step scheduler initialized successfully.');
+    } catch (err) {
+      console.warn('[AudioEngine] Failed to initialize AudioWorklet scheduler — using Tone.Transport fallback:', err);
+      this._workletNode = null;
+      this._useWorklet = false;
+    }
+  }
+
+  /**
+   * Handle a step message from the AudioWorklet processor.
+   * This runs on the main thread — triggered by the worklet's port.postMessage.
+   * We use Tone.now() for the audio time and Tone.getDraw().schedule() for UI updates.
+   */
+  private _onWorkletStep(step: number): void {
+    const time = Tone.now();
+
+    if (this._playbackMode === 'playlist') {
+      this._onWorkletPlaylistStep(step, time);
+    } else {
+      this._onWorkletPatternStep(step, time);
+    }
+  }
+
+  /**
+   * Pattern-mode worklet step handler. Fires channels from the active pattern.
+   */
+  private _onWorkletPatternStep(step: number, time: number): void {
+    // Sync UI step indicator via draw callback
+    Tone.getDraw().schedule(() => {
+      useDAWStore.getState().setCurrentStep(step);
+    }, time);
+
+    const state = useDAWStore.getState();
+    const pattern = state.getActivePattern();
+    if (!pattern) return;
+
+    const channels = pattern.channels;
+    const hasSolo = channels.some((c) => c.solo);
+
+    for (const channel of channels) {
+      if (channel.muted) continue;
+      if (hasSolo && !channel.solo) continue;
+      if (!channel.steps[step]) continue;
+
+      this._triggerChannel(channel, step, pattern, time);
+    }
+  }
+
+  /**
+   * Playlist-mode worklet step handler. The worklet sends wrapped step indices
+   * (0..totalSteps-1). We map these to global playlist steps and trigger clips.
+   */
+  private _onWorkletPlaylistStep(step: number, time: number): void {
+    // The worklet's step IS our global step since we set totalSteps = playlistTotalSteps
+    const globalStep = step;
+
+    if (globalStep >= this._playlistTotalSteps) {
+      // Arrangement ended — stop playback
+      Tone.getDraw().schedule(() => {
+        useDAWStore.getState().stop();
+      }, time);
+      return;
+    }
+
+    // Sync UI
+    Tone.getDraw().schedule(() => {
+      useDAWStore.getState().setPlaylistStep(globalStep);
+    }, time);
+
+    const state = useDAWStore.getState();
+    const globalBar = Math.floor(globalStep / 16);
+    const stepInBar = globalStep % 16;
+
+    for (const clip of state.playlistClips) {
+      if (globalBar < clip.startBar || globalBar >= clip.startBar + clip.lengthBars) continue;
+
+      const pattern = state.patterns.find(p => p.id === clip.patternId);
+      if (!pattern) continue;
+
+      const patternTotalSteps = (pattern.bars ?? 1) * 16;
+      const barInPattern = globalBar - clip.startBar;
+      const stepInPattern = (barInPattern * 16 + stepInBar) % patternTotalSteps;
+
+      const hasSolo = pattern.channels.some(c => c.solo);
+      const clipNodes = this.playlistClipNodes.get(clip.id);
+
+      for (const channel of pattern.channels) {
+        if (channel.muted) continue;
+        if (hasSolo && !channel.solo) continue;
+        if (!channel.steps[stepInPattern]) continue;
+
+        const nodes = clipNodes?.get(channel.id);
+        if (nodes) {
+          this._triggerChannelWithNodes(channel, stepInPattern, pattern, time, nodes);
+        }
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -155,17 +446,20 @@ class AudioEngine {
       }
     );
 
-    // mixerChannels — sync volume/pan/mute/EQ to audio nodes when mixer changes
+    // mixerChannels — debounced sync to avoid gain-ramp storms during playback
     const unsubMixer = useDAWStore.subscribe(
       (s) => s.mixerChannels,
       (mixerChannels) => {
-        for (const mc of mixerChannels) {
-          if (!mc.linkedChannelId) continue; // skip master (no linked channel)
-          const vol = mc.muted ? 0 : mc.volume;
-          this.updateChannelVolume(mc.linkedChannelId, vol);
-          this.updateChannelPan(mc.linkedChannelId, mc.pan);
-          this.updateChannelEq(mc.linkedChannelId, mc.eq);
-        }
+        if (this._mixerUpdateTimer) clearTimeout(this._mixerUpdateTimer);
+        this._mixerUpdateTimer = setTimeout(() => {
+          for (const mc of mixerChannels) {
+            if (!mc.linkedChannelId) continue;
+            const vol = mc.muted ? 0 : mc.volume;
+            this.updateChannelVolume(mc.linkedChannelId, vol);
+            this.updateChannelPan(mc.linkedChannelId, mc.pan);
+            this.updateChannelEq(mc.linkedChannelId, mc.eq);
+          }
+        }, 32);
       }
     );
 
@@ -185,9 +479,7 @@ class AudioEngine {
       }
     );
 
-    // Channel volume/pan/mute — update audio nodes when these properties change.
-    // Derives a lightweight key so step toggles (which don't touch vol/pan/mute)
-    // don't trigger unnecessary updates.
+    // Channel volume/pan/mute — debounced to batch rapid changes
     const unsubChannelProps = useDAWStore.subscribe(
       (s) => {
         const p = s.patterns.find((pat) => pat.id === s.activePatternId);
@@ -195,16 +487,36 @@ class AudioEngine {
         return p.channels.map((c) => `${c.id}:${c.volume}:${c.pan}:${c.muted}:${c.solo}`).join('|');
       },
       () => {
-        const pattern = useDAWStore.getState().getActivePattern();
-        if (!pattern) return;
-        for (const ch of pattern.channels) {
-          this.updateChannelVolume(ch.id, ch.muted ? 0 : ch.volume);
-          this.updateChannelPan(ch.id, ch.pan);
-        }
+        if (this._channelPropsUpdateTimer) clearTimeout(this._channelPropsUpdateTimer);
+        this._channelPropsUpdateTimer = setTimeout(() => {
+          const pattern = useDAWStore.getState().getActivePattern();
+          if (!pattern) return;
+          for (const ch of pattern.channels) {
+            this.updateChannelVolume(ch.id, ch.muted ? 0 : ch.volume);
+            this.updateChannelPan(ch.id, ch.pan);
+          }
+        }, 32);
       }
     );
 
-    this.storeUnsubscribers.push(unsubPlaying, unsubBpm, unsubVolume, unsubMixer, unsubChannels, unsubChannelProps);
+    // audioLatency + audioSampleRate — reinit context when either changes
+    const unsubAudioLatency = useDAWStore.subscribe(
+      (s) => s.audioLatency,
+      (latency) => {
+        const sr = useDAWStore.getState().audioSampleRate;
+        this.reinitWithSettings(latency, sr);
+      }
+    );
+
+    const unsubAudioSampleRate = useDAWStore.subscribe(
+      (s) => s.audioSampleRate,
+      (sampleRate) => {
+        const lat = useDAWStore.getState().audioLatency;
+        this.reinitWithSettings(lat, sampleRate);
+      }
+    );
+
+    this.storeUnsubscribers.push(unsubPlaying, unsubBpm, unsubVolume, unsubMixer, unsubChannels, unsubChannelProps, unsubAudioLatency, unsubAudioSampleRate);
   }
 
   // ---------------------------------------------------------------------------
@@ -287,9 +599,9 @@ class AudioEngine {
       });
     }
 
-    // ---- Tonal: FMSynth ----
+    // ---- Tonal: FMSynth (PolySynth for overlapping notes) ----
     if (inst.synthType === 'fm') {
-      return new Tone.FMSynth({
+      const poly = new Tone.PolySynth(Tone.FMSynth, {
         harmonicity: 3,
         modulationIndex: 10,
         oscillator: { type: 'sine' },
@@ -306,13 +618,15 @@ class AudioEngine {
           sustain: 0.3,
           release: 0.01,
         },
-        volume: 0,
       });
+      poly.maxPolyphony = 6;
+      poly.volume.value = 0;
+      return poly;
     }
 
-    // ---- Tonal: AMSynth ----
+    // ---- Tonal: AMSynth (PolySynth for overlapping notes) ----
     if (inst.synthType === 'am') {
-      return new Tone.AMSynth({
+      const poly = new Tone.PolySynth(Tone.AMSynth, {
         harmonicity: 2,
         oscillator: { type: 'sine' },
         envelope: {
@@ -328,13 +642,15 @@ class AudioEngine {
           sustain: 1,
           release: 0.5,
         },
-        volume: 0,
       });
+      poly.maxPolyphony = 6;
+      poly.volume.value = 0;
+      return poly;
     }
 
-    // ---- Default tonal: Synth (sawtooth for bass, sine for sub808, triangle for others) ----
+    // ---- Default tonal: Synth (PolySynth — sawtooth for bass, sine for sub808, triangle for others) ----
     const oscType: OscillatorType = type === 'bass' ? 'sawtooth' : type === 'sub808' ? 'sine' : 'triangle';
-    return new Tone.Synth({
+    const poly = new Tone.PolySynth(Tone.Synth, {
       oscillator: { type: oscType },
       envelope: {
         attack: clamp(inst.attack ?? 0.01, 0.0001, 2),
@@ -342,8 +658,10 @@ class AudioEngine {
         sustain: clamp(inst.sustain ?? 0.5, 0, 1),
         release: clamp(inst.release ?? 0.5, 0.001, 4),
       },
-      volume: 0,
     });
+    poly.maxPolyphony = 6;
+    poly.volume.value = 0;
+    return poly;
   }
 
   // ---------------------------------------------------------------------------
@@ -581,7 +899,7 @@ class AudioEngine {
     if (!nodes) return;
     nodes.gain.gain.rampTo(
       Tone.dbToGain(linearToDb(clamp(volume, 0, 1))),
-      0.01
+      0.03
     );
   }
 
@@ -589,7 +907,7 @@ class AudioEngine {
   updateChannelPan(id: string, pan: number): void {
     const nodes = this.channelNodes.get(id);
     if (!nodes) return;
-    nodes.panner.pan.rampTo(clamp(pan, -1, 1), 0.01);
+    nodes.panner.pan.rampTo(clamp(pan, -1, 1), 0.03);
   }
 
   /** Update the channel EQ bands — no-op until Tone.EQ3 is available in the installed version. */
@@ -614,6 +932,26 @@ class AudioEngine {
       return;
     }
 
+    // ---- AudioWorklet path: sample-accurate step scheduling on the audio thread ----
+    if (this._useWorklet && this._workletNode) {
+      Tone.start().then(() => {
+        this._playbackMode = 'pattern';
+
+        const activePattern = useDAWStore.getState().getActivePattern();
+        const totalSteps = (activePattern?.bars ?? 1) * 16;
+
+        // Tell the worklet the total steps and BPM, then start
+        this._workletNode!.port.postMessage({ type: 'setTotalSteps', totalSteps });
+        this._workletNode!.port.postMessage({ type: 'setBpm', bpm: useDAWStore.getState().bpm });
+        this._workletNode!.port.postMessage({ type: 'start' });
+        this._workletRunning = true;
+      }).catch((err) =>
+        console.warn('[AudioEngine] Tone.start() error (worklet pattern):', err)
+      );
+      return;
+    }
+
+    // ---- Fallback: Tone.Transport.scheduleRepeat ----
     // Await context unlock BEFORE starting transport so audio actually plays
     Tone.start().then(() => {
       const transport = Tone.getTransport();
@@ -643,25 +981,71 @@ class AudioEngine {
   }
 
   /**
+   * Build dedicated channel nodes for each playlist clip so overlapping clips
+   * that reference the same pattern get independent synth instances.
+   */
+  private _syncPlaylistClipNodes(): void {
+    if (!this.masterGain) return;
+
+    const state = useDAWStore.getState();
+    const activeClipIds = new Set(state.playlistClips.map(c => c.id));
+
+    // Dispose nodes for clips that no longer exist
+    for (const [clipId, channelMap] of Array.from(this.playlistClipNodes.entries())) {
+      if (!activeClipIds.has(clipId)) {
+        for (const nodes of channelMap.values()) {
+          this._disposeChannelNodes(nodes);
+        }
+        this.playlistClipNodes.delete(clipId);
+      }
+    }
+
+    // Build nodes for each clip's channels
+    for (const clip of state.playlistClips) {
+      const pattern = state.patterns.find(p => p.id === clip.patternId);
+      if (!pattern) continue;
+
+      let clipMap = this.playlistClipNodes.get(clip.id);
+      if (!clipMap) {
+        clipMap = new Map();
+        this.playlistClipNodes.set(clip.id, clipMap);
+      }
+
+      for (const channel of pattern.channels) {
+        if (clipMap.has(channel.id)) continue; // already built
+        try {
+          const nodes = this._buildChannelSignalChain(channel);
+          clipMap.set(channel.id, nodes);
+
+          if (channel.type === 'sample' && channel.sampleUrl) {
+            this.loadSampleForChannel(channel).catch(() => {});
+          }
+        } catch (err) {
+          console.error(`[AudioEngine] Failed to build playlist clip channel "${channel.name}":`, err);
+        }
+      }
+    }
+  }
+
+  /** Dispose all playlist clip nodes. */
+  private _disposePlaylistClipNodes(): void {
+    for (const channelMap of this.playlistClipNodes.values()) {
+      for (const nodes of channelMap.values()) {
+        this._disposeChannelNodes(nodes);
+      }
+    }
+    this.playlistClipNodes.clear();
+  }
+
+  /**
    * Playlist playback mode: walks through the arrangement timeline bar-by-bar,
    * triggering channels from all active clips at each step.
    */
   private _transportStartPlaylist(): void {
-    // Sync channels from ALL patterns referenced by clips
     const state = useDAWStore.getState();
-    const referencedPatternIds = new Set(state.playlistClips.map(c => c.patternId));
-    const allChannels: Channel[] = [];
-    for (const pid of referencedPatternIds) {
-      const pat = state.patterns.find(p => p.id === pid);
-      if (pat) {
-        for (const ch of pat.channels) {
-          if (!allChannels.some(c => c.id === ch.id)) {
-            allChannels.push(ch);
-          }
-        }
-      }
-    }
-    this.syncChannels(allChannels);
+
+    // Build per-clip channel nodes so overlapping clips don't share synths
+    this._syncPlaylistClipNodes();
 
     // Find the end of the arrangement (last clip end bar)
     const lastBar = state.playlistClips.reduce(
@@ -669,13 +1053,30 @@ class AudioEngine {
       0
     );
     if (lastBar === 0) {
-      // No clips — nothing to play
       useDAWStore.getState().stop();
       return;
     }
 
     const totalPlaylistSteps = lastBar * 16;
 
+    // ---- AudioWorklet path ----
+    if (this._useWorklet && this._workletNode) {
+      Tone.start().then(() => {
+        this._playbackMode = 'playlist';
+        this._playlistTotalSteps = totalPlaylistSteps;
+
+        // Set total steps so the worklet counts from 0 to totalPlaylistSteps-1
+        this._workletNode!.port.postMessage({ type: 'setTotalSteps', totalSteps: totalPlaylistSteps });
+        this._workletNode!.port.postMessage({ type: 'setBpm', bpm: useDAWStore.getState().bpm });
+        this._workletNode!.port.postMessage({ type: 'start' });
+        this._workletRunning = true;
+      }).catch((err) =>
+        console.warn('[AudioEngine] Tone.start() error (worklet playlist):', err)
+      );
+      return;
+    }
+
+    // ---- Fallback: Tone.Transport.scheduleRepeat ----
     Tone.start().then(() => {
       const transport = Tone.getTransport();
 
@@ -689,7 +1090,6 @@ class AudioEngine {
       this.repeatId = transport.scheduleRepeat(
         (time: number) => {
           if (globalStep >= totalPlaylistSteps) {
-            // Reached end of arrangement — stop
             Tone.getDraw().schedule(() => {
               useDAWStore.getState().stop();
             }, time);
@@ -710,10 +1110,9 @@ class AudioEngine {
 
   /**
    * Playlist step handler: at each global step, find all active clips and
-   * trigger the appropriate channels from each clip's pattern.
+   * trigger the appropriate channels using per-clip nodes.
    */
   private _onPlaylistStep(globalStep: number, time: number): void {
-    // Update playlist step in store for playhead display
     Tone.getDraw().schedule(() => {
       useDAWStore.getState().setPlaylistStep(globalStep);
     }, time);
@@ -723,7 +1122,6 @@ class AudioEngine {
     const stepInBar = globalStep % 16;
 
     for (const clip of state.playlistClips) {
-      // Is this clip active at the current global bar?
       if (globalBar < clip.startBar || globalBar >= clip.startBar + clip.lengthBars) continue;
 
       const pattern = state.patterns.find(p => p.id === clip.patternId);
@@ -734,18 +1132,91 @@ class AudioEngine {
       const stepInPattern = (barInPattern * 16 + stepInBar) % patternTotalSteps;
 
       const hasSolo = pattern.channels.some(c => c.solo);
+      const clipNodes = this.playlistClipNodes.get(clip.id);
 
       for (const channel of pattern.channels) {
         if (channel.muted) continue;
         if (hasSolo && !channel.solo) continue;
         if (!channel.steps[stepInPattern]) continue;
 
-        this._triggerChannel(channel, stepInPattern, pattern, time);
+        // Use per-clip nodes to avoid shared-synth conflicts
+        const nodes = clipNodes?.get(channel.id);
+        if (nodes) {
+          this._triggerChannelWithNodes(channel, stepInPattern, pattern, time, nodes);
+        }
       }
     }
   }
 
+  /** Trigger a channel using specific nodes (for playlist per-clip isolation). */
+  private _triggerChannelWithNodes(
+    channel: Channel,
+    stepIndex: number,
+    pattern: Pattern,
+    time: number,
+    nodes: ChannelNodes
+  ): void {
+    // Sample playback
+    if (nodes.player && nodes.player.loaded) {
+      try {
+        const offset = channel.sampleStart ?? 0;
+        const end = channel.sampleEnd;
+        const duration = (end != null && end > offset) ? end - offset : undefined;
+        nodes.player.start(time, offset, duration);
+      } catch (err) {
+        console.warn(`[AudioEngine] player.start() failed for channel "${channel.name}":`, err);
+      }
+      return;
+    }
+
+    const { synth } = nodes;
+    const type = channel.type as ChannelType;
+    const isPercussion =
+      type === 'kick' || type === 'snare' || type === 'clap' ||
+      type === 'hihat' || type === 'openhat' || type === 'perc';
+
+    if (type === 'sample') return;
+
+    try {
+      if (synth instanceof Tone.NoiseSynth) {
+        try { synth.triggerRelease(time); } catch { /* may not be playing */ }
+        synth.triggerAttackRelease('8n', time + 0.001);
+      } else if (synth instanceof Tone.MembraneSynth) {
+        try { synth.triggerRelease(time); } catch { /* may not be playing */ }
+        const pitchHz = channel.instrument.pitch ?? (type === 'kick' ? 60 : 200);
+        synth.triggerAttackRelease(pitchHz, '8n', time + 0.001);
+      } else if (synth instanceof Tone.MetalSynth) {
+        try { synth.triggerRelease(time); } catch { /* may not be playing */ }
+        synth.triggerAttackRelease('16n', time + 0.001);
+      } else if (isPercussion) {
+        (synth as ToneSynth).triggerAttackRelease(midiToFreq(60), '16n', time);
+      } else {
+        const pianoNotes: Note[] = pattern.pianoRollNotes[channel.id] ?? [];
+        const notesAtStep = pianoNotes.filter((n) => n.start === stepIndex);
+
+        if (notesAtStep.length > 0) {
+          for (const note of notesAtStep) {
+            const freq = midiToFreq(note.pitch + (channel.instrument.tune ?? 0));
+            const durNotation = this._sixteenthsToDuration(note.duration);
+            (synth as ToneSynth).triggerAttackRelease(freq, durNotation, time, note.velocity);
+          }
+        } else {
+          const midiBase = 60 + (channel.instrument.tune ?? 0);
+          (synth as ToneSynth).triggerAttackRelease(midiToFreq(midiBase), '8n', time);
+        }
+      }
+    } catch (err) {
+      console.warn(`[AudioEngine] triggerAttackRelease failed for channel "${channel.name}":`, err);
+    }
+  }
+
   private _transportStop(): void {
+    // Stop the AudioWorklet scheduler if it's running
+    if (this._workletRunning && this._workletNode) {
+      this._workletNode.port.postMessage({ type: 'stop' });
+      this._workletRunning = false;
+    }
+
     const transport = Tone.getTransport();
 
     if (this.repeatId !== null) {
@@ -755,6 +1226,9 @@ class AudioEngine {
 
     transport.stop();
     transport.position = 0;
+
+    // Clean up per-clip playlist nodes to free memory
+    this._disposePlaylistClipNodes();
 
     useDAWStore.getState().setCurrentStep(0);
   }
@@ -775,6 +1249,16 @@ class AudioEngine {
     for (const channel of channels) {
       if (channel.muted) continue;
       if (hasSolo && !channel.solo) continue;
+
+      // Frozen channels: the pre-rendered buffer is triggered at step 0 only,
+      // regardless of individual step states (they're baked into the buffer).
+      if (channel.frozen) {
+        if (stepIndex === 0) {
+          this._triggerChannel(channel, stepIndex, pattern, time);
+        }
+        continue;
+      }
+
       if (!channel.steps[stepIndex]) continue;
 
       this._triggerChannel(channel, stepIndex, pattern, time);
@@ -789,6 +1273,21 @@ class AudioEngine {
   ): void {
     const nodes = this.channelNodes.get(channel.id);
     if (!nodes) return;
+
+    // Frozen channel: play the pre-rendered buffer instead of live synth.
+    // The frozen buffer contains the entire pattern, so we trigger it once at step 0.
+    if (channel.frozen) {
+      const frozenPlayer = this.frozenPlayers.get(channel.id);
+      if (frozenPlayer && frozenPlayer.loaded && stepIndex === 0) {
+        try {
+          try { frozenPlayer.stop(); } catch { /* may not be playing */ }
+          frozenPlayer.start(time);
+        } catch (err) {
+          console.warn(`[AudioEngine] frozen player.start() failed for "${channel.name}":`, err);
+        }
+      }
+      return;
+    }
 
     // If this channel has a loaded Tone.Player (sample type), use it instead of synth
     if (nodes.player && nodes.player.loaded) {
@@ -815,31 +1314,33 @@ class AudioEngine {
 
     try {
       if (synth instanceof Tone.NoiseSynth) {
-        // NoiseSynth does not accept a frequency argument
-        synth.triggerAttackRelease('8n', time);
+        // Clean release before retrigger to prevent abrupt cuts
+        try { synth.triggerRelease(time); } catch { /* may not be playing */ }
+        synth.triggerAttackRelease('8n', time + 0.001);
       } else if (synth instanceof Tone.MembraneSynth) {
+        try { synth.triggerRelease(time); } catch { /* may not be playing */ }
         const pitchHz = channel.instrument.pitch ?? (type === 'kick' ? 60 : 200);
-        synth.triggerAttackRelease(pitchHz, '8n', time);
+        synth.triggerAttackRelease(pitchHz, '8n', time + 0.001);
       } else if (synth instanceof Tone.MetalSynth) {
-        synth.triggerAttackRelease('16n', time);
+        try { synth.triggerRelease(time); } catch { /* may not be playing */ }
+        synth.triggerAttackRelease('16n', time + 0.001);
       } else if (isPercussion) {
         // Generic percussion fallback
-        (synth as Tone.Synth | Tone.FMSynth | Tone.AMSynth).triggerAttackRelease(
+        (synth as ToneSynth).triggerAttackRelease(
           midiToFreq(60),
           '16n',
           time
         );
       } else {
-        // Tonal channel — look for piano roll notes first
+        // Tonal channel (PolySynth) — look for piano roll notes first
         const pianoNotes: Note[] = pattern.pianoRollNotes[channel.id] ?? [];
         const notesAtStep = pianoNotes.filter((n) => n.start === stepIndex);
 
         if (notesAtStep.length > 0) {
           for (const note of notesAtStep) {
             const freq = midiToFreq(note.pitch + (channel.instrument.tune ?? 0));
-            // Convert duration in 16th-note units to Tone.js notation
             const durNotation = this._sixteenthsToDuration(note.duration);
-            (synth as Tone.Synth | Tone.FMSynth | Tone.AMSynth).triggerAttackRelease(
+            (synth as ToneSynth).triggerAttackRelease(
               freq,
               durNotation,
               time,
@@ -850,7 +1351,7 @@ class AudioEngine {
           // Default: play middle C with semitone tune offset
           const midiBase = 60 + (channel.instrument.tune ?? 0);
           const freq = midiToFreq(midiBase);
-          (synth as Tone.Synth | Tone.FMSynth | Tone.AMSynth).triggerAttackRelease(
+          (synth as ToneSynth).triggerAttackRelease(
             freq,
             '8n',
             time
@@ -875,6 +1376,134 @@ class AudioEngine {
   }
 
   // ---------------------------------------------------------------------------
+  // Track Freeze — offline rendering
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Pre-render a channel's step pattern to an AudioBuffer using Tone.OfflineContext.
+   * Replicates the channel's synth type, envelope, and effects chain offline so
+   * that during playback we play a simple buffer instead of live synthesis.
+   */
+  async renderChannelToBuffer(
+    channel: Channel,
+    bpm: number,
+    totalSteps: number,
+    pianoRollNotes: Note[] = []
+  ): Promise<AudioBuffer> {
+    const secondsPer16th = 60 / bpm / 4;
+    const tailSeconds = 2;
+    const totalDuration = totalSteps * secondsPer16th + tailSeconds;
+    const sampleRate = 44100;
+    const type = channel.type as ChannelType;
+    const inst = channel.instrument;
+
+    const offlineToneCtx = new Tone.OfflineContext(2, totalDuration, sampleRate);
+    const prevCtx = Tone.getContext();
+    Tone.setContext(offlineToneCtx);
+
+    try {
+      const synth = this.createSynthForChannel(channel);
+
+      let distortion: Tone.Distortion | undefined;
+      let reverb: Tone.Reverb | undefined;
+      let delay: Tone.FeedbackDelay | undefined;
+
+      if ((inst.distortion ?? 0) > 0) {
+        distortion = new Tone.Distortion(clamp(inst.distortion!, 0, 1));
+      }
+      if ((inst.reverb ?? 0) > 0) {
+        reverb = new Tone.Reverb({
+          decay: 1 + clamp(inst.reverb!, 0, 1) * 4,
+          wet: clamp(inst.reverb!, 0, 1),
+        });
+        await reverb.ready;
+      }
+      if ((inst.delay ?? 0) > 0) {
+        delay = new Tone.FeedbackDelay({
+          delayTime: '8n',
+          feedback: clamp(inst.delay! * 0.5, 0, 0.9),
+          wet: clamp(inst.delay!, 0, 1),
+        });
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let current: any = synth;
+      if (distortion) { current.connect(distortion); current = distortion; }
+      if (reverb) { current.connect(reverb); current = reverb; }
+      if (delay) { current.connect(delay); current = delay; }
+      (current as Tone.ToneAudioNode).toDestination();
+
+      const isPercussion =
+        type === 'kick' || type === 'snare' || type === 'clap' ||
+        type === 'hihat' || type === 'openhat' || type === 'perc';
+
+      for (let step = 0; step < totalSteps; step++) {
+        if (!channel.steps[step]) continue;
+        const time = step * secondsPer16th;
+        if (type === 'sample') continue;
+
+        if (synth instanceof Tone.NoiseSynth) {
+          synth.triggerAttackRelease('8n', time + 0.001);
+        } else if (synth instanceof Tone.MembraneSynth) {
+          const pitchHz = inst.pitch ?? (type === 'kick' ? 60 : 200);
+          synth.triggerAttackRelease(pitchHz, '8n', time + 0.001);
+        } else if (synth instanceof Tone.MetalSynth) {
+          synth.triggerAttackRelease('16n', time + 0.001);
+        } else if (isPercussion) {
+          (synth as ToneSynth).triggerAttackRelease(midiToFreq(60), '16n', time);
+        } else {
+          const notesAtStep = pianoRollNotes.filter((n) => n.start === step);
+          if (notesAtStep.length > 0) {
+            for (const note of notesAtStep) {
+              const freq = midiToFreq(note.pitch + (inst.tune ?? 0));
+              const durSec = note.duration * secondsPer16th;
+              (synth as ToneSynth).triggerAttackRelease(freq, durSec, time, note.velocity);
+            }
+          } else {
+            const midiBase = 60 + (inst.tune ?? 0);
+            (synth as ToneSynth).triggerAttackRelease(midiToFreq(midiBase), '8n', time);
+          }
+        }
+      }
+
+      const renderedBuffer = await offlineToneCtx.render();
+      synth.disconnect(); synth.dispose();
+      distortion?.disconnect(); distortion?.dispose();
+      reverb?.disconnect(); reverb?.dispose();
+      delay?.disconnect(); delay?.dispose();
+      return renderedBuffer as unknown as AudioBuffer;
+    } finally {
+      Tone.setContext(prevCtx);
+    }
+  }
+
+  /**
+   * Load a frozen buffer (blob URL) into a Tone.Player and wire it into
+   * the channel's existing panner -> gain -> master chain.
+   */
+  async loadFrozenPlayer(channelId: string, blobUrl: string): Promise<void> {
+    if (!this.masterGain) return;
+    this.disposeFrozenPlayer(channelId);
+    const nodes = this.channelNodes.get(channelId);
+    if (!nodes) return;
+    const player = new Tone.Player({ url: blobUrl, loop: false, autostart: false });
+    await player.load(blobUrl);
+    player.connect(nodes.panner);
+    this.frozenPlayers.set(channelId, player);
+  }
+
+  /** Dispose a frozen player for the given channel. */
+  disposeFrozenPlayer(channelId: string): void {
+    const existing = this.frozenPlayers.get(channelId);
+    if (existing) {
+      try { existing.stop(); } catch { /* may not be playing */ }
+      existing.disconnect();
+      existing.dispose();
+      this.frozenPlayers.delete(channelId);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Public transport controls
   // ---------------------------------------------------------------------------
 
@@ -891,7 +1520,13 @@ class AudioEngine {
 
   /** Set the sequencer BPM. */
   setBpm(bpm: number): void {
-    Tone.getTransport().bpm.value = clamp(bpm, 20, 400);
+    const clampedBpm = clamp(bpm, 20, 400);
+    Tone.getTransport().bpm.value = clampedBpm;
+
+    // Also update the worklet scheduler if active
+    if (this._workletNode) {
+      this._workletNode.port.postMessage({ type: 'setBpm', bpm: clampedBpm });
+    }
   }
 
   /** Set master output volume (0-1 linear). */
@@ -971,7 +1606,7 @@ class AudioEngine {
             synth.triggerAttackRelease(duration, Tone.now());
           } else {
             const freq = midiToFreq(pitch + (channel.instrument.tune ?? 0));
-            (synth as Tone.Synth | Tone.FMSynth | Tone.AMSynth).triggerAttackRelease(
+            (synth as ToneSynth).triggerAttackRelease(
               freq,
               duration
             );
@@ -995,10 +1630,30 @@ class AudioEngine {
   dispose(): void {
     this.stop();
 
+    // Dispose the AudioWorklet node
+    if (this._workletNode) {
+      try {
+        this._workletNode.port.postMessage({ type: 'stop' });
+        this._workletNode.disconnect();
+      } catch {
+        // non-fatal
+      }
+      this._workletNode = null;
+      this._useWorklet = false;
+      this._workletRunning = false;
+    }
+
     for (const nodes of Array.from(this.channelNodes.values())) {
       this._disposeChannelNodes(nodes);
     }
     this.channelNodes.clear();
+
+    this._disposePlaylistClipNodes();
+
+    // Dispose all frozen players
+    for (const channelId of Array.from(this.frozenPlayers.keys())) {
+      this.disposeFrozenPlayer(channelId);
+    }
 
     this.masterGain?.disconnect();
     this.masterGain?.dispose();
@@ -1008,6 +1663,9 @@ class AudioEngine {
       unsub();
     }
     this.storeUnsubscribers = [];
+
+    if (this._mixerUpdateTimer) clearTimeout(this._mixerUpdateTimer);
+    if (this._channelPropsUpdateTimer) clearTimeout(this._channelPropsUpdateTimer);
 
     this.initialized = false;
     AudioEngine._instance = null;

@@ -266,6 +266,81 @@ async function extractFeatures(rawData: Float32Array, sampleRate: number): Promi
   };
 }
 
+// ─── Worker-based analysis (off main thread) ──────────────────────────────────
+
+function isWorkerAvailable(): boolean {
+  return typeof Worker !== 'undefined';
+}
+
+async function analyzeAudioInWorker(
+  file: File,
+  existingPattern: Pattern,
+): Promise<{ result: BeatGenerationResult; style: string }> {
+  if (typeof window === 'undefined') {
+    throw new Error('Audio analysis is only available in the browser.');
+  }
+
+  // Decode audio on the main thread (AudioContext is not available in workers)
+  const arrayBuffer = await file.arrayBuffer();
+  const audioCtx = new AudioContext();
+  const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+  await audioCtx.close();
+
+  // Limit to first 30 s for performance
+  const sampleRate = audioBuffer.sampleRate;
+  const maxSamples = Math.min(audioBuffer.length, sampleRate * 30);
+  const channelData = audioBuffer.getChannelData(0).slice(0, maxSamples);
+
+  return new Promise<{ result: BeatGenerationResult; style: string }>((resolve, reject) => {
+    // Indirect URL construction prevents Turbopack from trying to bundle the worker
+    const workerUrl = new URL('/workers/beat-analysis-worker.js', window.location.origin);
+    const worker = new Worker(workerUrl);
+
+    worker.onmessage = (e: MessageEvent) => {
+      const msg = e.data;
+      worker.terminate();
+
+      if (msg.type === 'result') {
+        // Reconstruct waveformData as Float32Array from the array sent by the worker
+        const waveformData = msg.result.waveformData
+          ? new Float32Array(msg.result.waveformData)
+          : undefined;
+
+        resolve({
+          result: {
+            bpm: msg.result.bpm,
+            offset: msg.result.offset,
+            pattern: msg.result.pattern as Pattern,
+            waveformData,
+          },
+          style: msg.style,
+        });
+      } else if (msg.type === 'error') {
+        reject(new Error(msg.message || 'Worker analysis failed'));
+      }
+    };
+
+    worker.onerror = (err) => {
+      worker.terminate();
+      reject(new Error(err.message || 'Worker encountered an error'));
+    };
+
+    // Prepare a JSON-safe copy of existingPattern (strip any non-transferable data)
+    const patternCopy = JSON.parse(JSON.stringify(existingPattern));
+
+    // Transfer the Float32Array to avoid copying
+    worker.postMessage(
+      {
+        type: 'analyze',
+        channelData,
+        sampleRate,
+        existingPattern: patternCopy,
+      },
+      [channelData.buffer],
+    );
+  });
+}
+
 // ─── Mini pattern preview ──────────────────────────────────────────────────────
 
 function MiniPatternPreview({ pattern }: { pattern: Pattern }) {
@@ -521,7 +596,7 @@ export default function BeatGenerator() {
     };
   }, []);
 
-  // Trigger analysis
+  // Trigger analysis — prefer Web Worker, fall back to main thread
   const handleAnalyze = useCallback(async () => {
     if (!selectedFile) return;
 
@@ -534,7 +609,22 @@ export default function BeatGenerator() {
       const existingPattern = getActivePattern();
       if (!existingPattern) throw new Error('No active pattern found in the project.');
 
-      const { result, style } = await analyzeAudio(selectedFile, existingPattern);
+      let analysisResult: { result: BeatGenerationResult; style: string };
+
+      if (isWorkerAvailable()) {
+        try {
+          analysisResult = await analyzeAudioInWorker(selectedFile, existingPattern);
+        } catch {
+          // Worker failed — fall back to main-thread analysis
+          console.warn('[BeatGenerator] Worker analysis failed, falling back to main thread.');
+          analysisResult = await analyzeAudio(selectedFile, existingPattern);
+        }
+      } else {
+        // Workers not supported — use main thread directly
+        analysisResult = await analyzeAudio(selectedFile, existingPattern);
+      }
+
+      const { result, style } = analysisResult;
 
       // Wait for the last animation stage to finish (at minimum)
       const totalAnimTime = ANALYSIS_STAGES.length * 800 + 200;

@@ -34,6 +34,8 @@ export interface Channel {
   sampleId?: string;    // IndexedDB key for persisted sample audio data
   sampleStart?: number; // Slice start time in seconds (for sample channels)
   sampleEnd?: number;   // Slice end time in seconds (for sample channels)
+  frozen?: boolean;           // True when channel audio is pre-rendered (track freeze)
+  frozenBufferUrl?: string;   // Blob URL of the pre-rendered audio buffer
 }
 
 export interface Note {

@@ -114,8 +114,6 @@ export default function PianoRoll() {
     addNote,
     removeNote,
     updateNote,
-    isPlaying,
-    currentStep,
   } = useDAWStore();
 
   const pattern = getActivePattern();
@@ -288,8 +286,26 @@ export default function PianoRoll() {
     return labels;
   }, [totalCols]);
 
-  // ── playback cursor X ──
-  const cursorX = isPlaying ? (currentStep / 16) * colWidth * 16 : null;
+  // ── playback cursor — direct DOM update to avoid re-renders on every step ──
+  const cursorRef = useRef<HTMLDivElement>(null);
+  const colWidthRef = useRef(colWidth);
+  colWidthRef.current = colWidth;
+  useEffect(() => {
+    const unsub = useDAWStore.subscribe(
+      (s) => ({ step: s.currentStep, playing: s.isPlaying }),
+      ({ step, playing }) => {
+        if (cursorRef.current) {
+          if (playing) {
+            cursorRef.current.style.display = 'block';
+            cursorRef.current.style.left = `${(step / 16) * colWidthRef.current * 16}px`;
+          } else {
+            cursorRef.current.style.display = 'none';
+          }
+        }
+      },
+    );
+    return unsub;
+  }, []);
 
   if (!channel) {
     const availableChannels = pattern?.channels ?? [];
@@ -570,13 +586,12 @@ export default function PianoRoll() {
                 );
               })}
 
-              {/* ── Playback cursor ── */}
-              {cursorX !== null && (
-                <div
-                  className="absolute top-0 bottom-0 w-0.5 bg-daw-accent z-20 pointer-events-none"
-                  style={{ left: cursorX }}
-                />
-              )}
+              {/* ── Playback cursor — positioned via ref, not React state ── */}
+              <div
+                ref={cursorRef}
+                className="absolute top-0 bottom-0 w-0.5 bg-daw-accent z-20 pointer-events-none"
+                style={{ display: 'none', left: 0 }}
+              />
             </div>
           </div>
         </div>

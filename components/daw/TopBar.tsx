@@ -1,8 +1,9 @@
 'use client';
 
-import { useRef, useCallback, KeyboardEvent } from 'react';
+import { useRef, useCallback, useEffect, KeyboardEvent } from 'react';
 import { useDAWStore } from '@/lib/store';
 import { ViewType } from '@/lib/types';
+import AudioSettings from './AudioSettings';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -35,8 +36,21 @@ export default function TopBar() {
   const bpm = useDAWStore((s) => s.bpm);
   const isPlaying = useDAWStore((s) => s.isPlaying);
   const isRecording = useDAWStore((s) => s.isRecording);
-  const currentStep = useDAWStore((s) => s.currentStep);
   const activeView = useDAWStore((s) => s.activeView);
+
+  // Position display — direct DOM update to avoid re-rendering entire TopBar on every step
+  const positionRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const unsub = useDAWStore.subscribe(
+      (s) => s.currentStep,
+      (step) => {
+        if (positionRef.current) {
+          positionRef.current.textContent = formatPosition(step);
+        }
+      },
+    );
+    return unsub;
+  }, []);
   const beatGeneratorOpen = useDAWStore((s) => s.beatGeneratorOpen);
   const patterns = useDAWStore((s) => s.patterns);
   const activePatternId = useDAWStore((s) => s.activePatternId);
@@ -50,8 +64,6 @@ export default function TopBar() {
   const setBeatGeneratorOpen = useDAWStore((s) => s.setBeatGeneratorOpen);
   const sampleSlicerOpen = useDAWStore((s) => s.sampleSlicerOpen);
   const setSampleSlicerOpen = useDAWStore((s) => s.setSampleSlicerOpen);
-  const youtubeConverterOpen = useDAWStore((s) => s.youtubeConverterOpen);
-  const setYoutubeConverterOpen = useDAWStore((s) => s.setYoutubeConverterOpen);
   const setMasterVolume = useDAWStore((s) => s.setMasterVolume);
   const addPattern = useDAWStore((s) => s.addPattern);
   const setActivePattern = useDAWStore((s) => s.setActivePattern);
@@ -205,9 +217,12 @@ export default function TopBar() {
           ⏺
         </button>
 
-        {/* Position display */}
-        <div className="ml-1 px-2 py-1 bg-daw-card border border-daw-border rounded text-[10px] text-daw-accent font-mono tracking-wider min-w-[86px] text-center">
-          {formatPosition(currentStep)}
+        {/* Position display — updated via ref, not React state */}
+        <div
+          ref={positionRef}
+          className="ml-1 px-2 py-1 bg-daw-card border border-daw-border rounded text-[10px] text-daw-accent font-mono tracking-wider min-w-[86px] text-center"
+        >
+          {formatPosition(0)}
         </div>
       </div>
 
@@ -350,18 +365,6 @@ export default function TopBar() {
           ✂️ SAMPLE
         </button>
 
-        <button
-          onClick={() => setYoutubeConverterOpen(!youtubeConverterOpen)}
-          className={[
-            'px-3 py-1.5 rounded text-[10px] font-mono font-bold tracking-wider transition-all',
-            'bg-gradient-to-r from-red-600 to-rose-700 text-white',
-            'hover:from-red-500 hover:to-rose-600 hover:shadow-lg hover:shadow-red-500/25',
-            youtubeConverterOpen ? 'ring-2 ring-red-400 ring-offset-1 ring-offset-daw-panel' : '',
-          ].join(' ')}
-          title="YouTube to MP3 Converter"
-        >
-          ▶ YT MP3
-        </button>
       </div>
 
       <Divider />
@@ -390,6 +393,9 @@ export default function TopBar() {
         <span className="text-daw-textMuted text-[10px] w-8 text-right tabular-nums">
           {Math.round(masterVolume * 100)}%
         </span>
+
+        {/* Audio settings gear icon */}
+        <AudioSettings />
       </div>
     </header>
   );

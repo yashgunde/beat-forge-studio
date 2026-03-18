@@ -73,6 +73,9 @@ function createDefaultMixerChannels(channels: Channel[]): MixerChannel[] {
   return mixerChannels;
 }
 
+export type AudioLatencyHint = 'interactive' | 'balanced' | 'playback';
+export type AudioSampleRate = 44100 | 48000 | 96000;
+
 interface DAWState {
   // Project
   projectName: string;
@@ -97,12 +100,15 @@ interface DAWState {
   mixerChannels: MixerChannel[];
   masterVolume: number;
 
+  // Audio settings
+  audioLatency: AudioLatencyHint;
+  audioSampleRate: AudioSampleRate;
+
   // UI
   activeView: ViewType;
   pianoRollChannelId: string | null;
   beatGeneratorOpen: boolean;
   sampleSlicerOpen: boolean;
-  youtubeConverterOpen: boolean;
   lastGenerationResult: BeatGenerationResult | null;
   theme: string;
 
@@ -125,6 +131,8 @@ interface DAWState {
   setChannelSteps: (channelId: string, steps: boolean[]) => void;
   clearAllSteps: (channelId: string) => void;
   setPatternBars: (patternId: string, bars: 1 | 2 | 4 | 8) => void;
+  freezeChannel: (channelId: string, frozenBufferUrl: string) => void;
+  unfreezeChannel: (channelId: string) => void;
 
   // Actions - Piano Roll
   openPianoRoll: (channelId: string) => void;
@@ -145,11 +153,14 @@ interface DAWState {
   setMasterVolume: (volume: number) => void;
   syncMixerFromChannels: () => void;
 
+  // Actions - Audio Settings
+  setAudioLatency: (latency: AudioLatencyHint) => void;
+  setAudioSampleRate: (sampleRate: AudioSampleRate) => void;
+
   // Actions - UI
   setActiveView: (view: ViewType) => void;
   setBeatGeneratorOpen: (open: boolean) => void;
   setSampleSlicerOpen: (open: boolean) => void;
-  setYoutubeConverterOpen: (open: boolean) => void;
   setTheme: (theme: string) => void;
   applyGeneratedPattern: (result: BeatGenerationResult) => void;
 }
@@ -173,11 +184,12 @@ export const useDAWStore = create<DAWState>()(
     playlistStep: 0,
     mixerChannels: createDefaultMixerChannels(defaultPattern.channels),
     masterVolume: 0.85,
+    audioLatency: 'interactive',
+    audioSampleRate: 44100,
     activeView: 'channelrack',
     pianoRollChannelId: null,
     beatGeneratorOpen: false,
     sampleSlicerOpen: false,
-    youtubeConverterOpen: false,
     lastGenerationResult: null,
     theme: 'classic',
 
@@ -345,6 +357,36 @@ export const useDAWStore = create<DAWState>()(
         }),
       })),
 
+    freezeChannel: (channelId, frozenBufferUrl) =>
+      set((s) => ({
+        patterns: s.patterns.map(p =>
+          p.id === s.activePatternId
+            ? {
+                ...p,
+                channels: p.channels.map(c =>
+                  c.id === channelId ? { ...c, frozen: true, frozenBufferUrl } : c
+                ),
+              }
+            : p
+        ),
+      })),
+
+    unfreezeChannel: (channelId) =>
+      set((s) => ({
+        patterns: s.patterns.map(p =>
+          p.id === s.activePatternId
+            ? {
+                ...p,
+                channels: p.channels.map(c =>
+                  c.id === channelId
+                    ? { ...c, frozen: false, frozenBufferUrl: undefined }
+                    : c
+                ),
+              }
+            : p
+        ),
+      })),
+
     // Piano Roll actions
     openPianoRoll: (channelId) => set({ pianoRollChannelId: channelId, activeView: 'piano-roll' }),
     closePianoRoll: () => set({ pianoRollChannelId: null, activeView: 'channelrack' }),
@@ -449,6 +491,10 @@ export const useDAWStore = create<DAWState>()(
       });
     },
 
+    // Audio settings actions
+    setAudioLatency: (audioLatency) => set({ audioLatency }),
+    setAudioSampleRate: (audioSampleRate) => set({ audioSampleRate }),
+
     // UI actions
     setActiveView: (activeView) => {
       // When switching to piano-roll without a channel selected, auto-select the first one
@@ -467,7 +513,6 @@ export const useDAWStore = create<DAWState>()(
     },
     setBeatGeneratorOpen: (beatGeneratorOpen) => set({ beatGeneratorOpen }),
     setSampleSlicerOpen: (sampleSlicerOpen) => set({ sampleSlicerOpen }),
-    setYoutubeConverterOpen: (youtubeConverterOpen) => set({ youtubeConverterOpen }),
     setTheme: (theme) => set({ theme }),
 
     applyGeneratedPattern: (result) => {
@@ -523,6 +568,8 @@ export const useDAWStore = create<DAWState>()(
         channels: p.channels.map(c => ({
           ...c,
           sampleUrl: c.sampleUrl?.startsWith('blob:') ? undefined : c.sampleUrl,
+          frozen: false,
+          frozenBufferUrl: undefined,
         })),
       })),
       activePatternId: state.activePatternId,
@@ -530,6 +577,8 @@ export const useDAWStore = create<DAWState>()(
       playlistBars: state.playlistBars,
       mixerChannels: state.mixerChannels,
       masterVolume: state.masterVolume,
+      audioLatency: state.audioLatency,
+      audioSampleRate: state.audioSampleRate,
       activeView: state.activeView,
       theme: state.theme,
     }) as unknown as DAWState,

@@ -14,7 +14,6 @@ import Mixer from './Mixer';
 import Playlist from './Playlist';
 import BeatGenerator from './BeatGenerator';
 import SampleSlicer from './SampleSlicer';
-import YouTubeConverter from './YouTubeConverter';
 import ThemePicker from './ThemePicker';
 
 export default function DAWShell() {
@@ -23,7 +22,6 @@ export default function DAWShell() {
   const activeView = useDAWStore((s) => s.activeView);
   const beatGeneratorOpen = useDAWStore((s) => s.beatGeneratorOpen);
   const sampleSlicerOpen = useDAWStore((s) => s.sampleSlicerOpen);
-  const youtubeConverterOpen = useDAWStore((s) => s.youtubeConverterOpen);
   const activePatternId = useDAWStore((s) => s.activePatternId);
   const getActivePattern = useDAWStore((s) => s.getActivePattern);
   const theme = useDAWStore((s) => s.theme);
@@ -104,12 +102,6 @@ export default function DAWShell() {
           </div>
         )}
 
-        {/* YouTube Converter modal overlay */}
-        {youtubeConverterOpen && (
-          <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-md">
-            <YouTubeConverter />
-          </div>
-        )}
       </div>
 
       {/* Sample Slicer — full-screen modal */}

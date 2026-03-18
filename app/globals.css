@@ -250,8 +250,9 @@ body {
 
 .step-btn {
   border-radius: 5px;
-  transition: all 0.1s ease;
+  transition: box-shadow 0.08s ease;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 1px 3px rgba(0,0,0,0.2);
+  will-change: box-shadow;
 }
 
 .step-btn-on {
@@ -261,11 +262,18 @@ body {
     inset 0 1px 0 rgba(255, 255, 255, 0.25);
 }
 
-.step-btn-current {
-  box-shadow: 0 0 14px rgba(255, 255, 255, 0.7), 0 0 6px white;
-  transform: scale(1.1);
-  z-index: 10;
-  position: relative;
+/* Playhead highlight — applied via direct DOM manipulation, not React.
+   Uses box-shadow only (GPU-composited) to avoid layout thrash. */
+.step-playhead:not(.step-btn-on) {
+  background-color: rgba(255, 255, 255, 0.18) !important;
+  box-shadow: 0 0 10px rgba(255, 255, 255, 0.4), 0 0 4px white;
+}
+.step-btn-on.step-playhead {
+  box-shadow:
+    0 0 14px var(--ch-color),
+    0 0 6px var(--ch-color),
+    inset 0 1px 0 rgba(255, 255, 255, 0.4);
+  filter: brightness(1.3);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
