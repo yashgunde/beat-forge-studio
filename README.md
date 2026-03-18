@@ -40,7 +40,7 @@ Built on **Next.js 15**, **Tone.js**, **Zustand**, and **Meyda**. Everything run
 
 ```bash
 # Prerequisites: Node.js 23+ (installed via Scoop on Windows)
-export PATH="/c/Users/Yash/scoop/apps/nodejs/23.1.0:$PATH"
+export PATH="/c/Users/{name}/scoop/apps/nodejs/23.1.0:$PATH"
 
 npm install
 npm run dev      # Turbopack dev server
